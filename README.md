@@ -9,7 +9,7 @@ ssh连接多个ip，批量执行命令
 
 或者
 
-从ip文件读取ip，文件格式: ip user password
+从ip文件读取ip列表，文件内容格式: ip user password
 如果ip都共用一个用户名密码 加上参数： -u user -p password
 ./batchcmd -ipf  /home/iplist
 ```
