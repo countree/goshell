@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -62,7 +61,7 @@ func checkParams(path string, i string, u string, p string) bool {
 }
 func bindSignal(exit func()) {
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, os.Interrupt)
 	go func() {
 		<-sigs
 		exit()
@@ -106,7 +105,6 @@ func (c *SshClient) scpFile(session *ssh.Session, cmd string) bool {
 		}
 		info, _ := file.Stat()
 		buf := make([]byte, 1024)
-		session.Stdin = nil
 		w, _ := session.StdinPipe()
 		fmt.Fprintln(w, "C0644", info.Size(), info.Name())
 		for {
@@ -136,20 +134,20 @@ func (cs *ClientService) Start() {
 			fmt.Println("参数错误") // 这里的err其实就是panic传入的内容
 		}
 	}()
-	cs.setIps()
-	if cs.connectSsh() {
+	cs.createClients()
+	if cs.connectSshClient() {
 		cs.waitIn()
 	} else {
 		fmt.Println("没有可用的连接")
 	}
 }
 
-func (cs *ClientService) setIps() {
+func (cs *ClientService) createClients() {
 	cs.Clients = make([]*SshClient, 0)
 	if cs.IpPath != "" {
-		cs.setIpByIppath()
+		cs.setClientsByIppath()
 	} else {
-		cs.setIpByIpbt()
+		cs.setClientsByIpbt()
 	}
 	if len(cs.Clients) <= 0 {
 		log.Fatal("没有可用的ip地址")
@@ -165,7 +163,7 @@ func (cs *ClientService) setIps() {
 }
 
 //从参数中获取ip列表
-func (cs *ClientService) setIpByIpbt() {
+func (cs *ClientService) setClientsByIpbt() {
 	ipbt := cs.Ipbt
 	split := strings.Split(ipbt, "-")
 	ipf := split[0]
@@ -180,12 +178,12 @@ func (cs *ClientService) setIpByIpbt() {
 	}
 	for i := s; i <= la; i++ {
 		ipa := append(fa[:3], strconv.Itoa(i))
-		cs.Clients = append(cs.Clients, createSshClient(strings.Join(ipa, "."), cs.DUser, cs.DPasswd))
+		cs.Clients = append(cs.Clients, newSshClient(strings.Join(ipa, "."), cs.DUser, cs.DPasswd))
 	}
 }
 
 //从文件中获取ip列表
-func (cs *ClientService) setIpByIppath() {
+func (cs *ClientService) setClientsByIppath() {
 	path := cs.IpPath
 	if _, err := os.Stat(path); err == nil {
 		fb, err := ioutil.ReadFile(path)
@@ -222,14 +220,14 @@ func (cs *ClientService) setIpByIppath() {
 				log.Println("格式错误:", l)
 				continue
 			}
-			cs.Clients = append(cs.Clients, createSshClient(ip, user, passwd))
+			cs.Clients = append(cs.Clients, newSshClient(ip, user, passwd))
 		}
 	} else {
 		log.Fatal("ip文件不存在:", path)
 	}
 
 }
-func createSshClient(ip, user, passwd string) *SshClient {
+func newSshClient(ip, user, passwd string) *SshClient {
 	return &SshClient{
 		Ip:     ip,
 		User:   user,
@@ -255,17 +253,23 @@ func (cs *ClientService) waitIn() {
 			cs.waitIn()
 		}
 	}()
+
 	for {
 		fmt.Print("> ")
 		inr := bufio.NewReader(os.Stdin)
 		inline, err := inr.ReadString('\n')
 		if err != nil {
-			log.Println("解析错误，请重新输入", err)
+			log.Println("命令错误，请重新输入", err)
 			continue
 		}
-		cmd := strings.ReplaceAll(inline, "\n", "")
+		cmd := strings.TrimSuffix(inline, "\n")
 		fields := strings.Fields(cmd)
 		if len(fields) == 0 {
+			continue
+		}
+		//如果最后一位是分号;不执行这个命令
+		lastword := fields[len(fields)-1]
+		if lastword == ";" {
 			continue
 		}
 		//fmt.Println("输入命令为：", cmd)
@@ -278,7 +282,7 @@ func (cs *ClientService) waitIn() {
 		case "q", "exit":
 			cs.Exit()
 			return
-		case "vim", "tail", "vi", "rm":
+		case "vim", "vi":
 			fmt.Println("不支持命令:", s)
 		case "scp":
 			if _, _, b := CheckSCP(cmd); !b {
@@ -286,16 +290,15 @@ func (cs *ClientService) waitIn() {
 				break
 			}
 			cs.RunCmd(cmdSpace)
-
 		case "save":
-			cs.RunCmdWithOut(strings.Join(fields[1:len(fields)-1], " "), fields[len(fields)-1], false)
+			cs.RunCmdWithOut(strings.Join(fields[1:len(fields)-1], " "), lastword, false)
 		case "mid":
-			p := checkMid(fields)
-			if p == "" {
+			path := checkMid(fields)
+			if path == "" {
 				fmt.Println("mid  outSaveFile")
 				break
 			}
-			cs.RunCmdWithOut("cat /etc/machine-id", p, true)
+			cs.RunCmdWithOut("cat /etc/machine-id", path, true)
 		default:
 			cs.RunCmd(cmdSpace)
 		}
@@ -315,15 +318,17 @@ func checkMid(fields []string) string {
 	return p
 }
 
-func (cs *ClientService) connectSsh() bool {
+func (cs *ClientService) connectSshClient() bool {
 	fmt.Print("连接中")
 	b := false
 	for _, c := range cs.Clients {
 		fmt.Print(".")
-		ctmp, err := creatSshConnect(c.Ip, c.User, c.Passwd)
+		ctmp, err := connectToShh(c.Ip, c.User, c.Passwd)
 		c.client = ctmp
 		if err == nil {
 			b = true
+		} else {
+			fmt.Printf("%s Session创建失败:%s\n", c.Ip, err)
 		}
 	}
 	fmt.Printf("\n连接完成\n")
@@ -331,10 +336,9 @@ func (cs *ClientService) connectSsh() bool {
 }
 
 func (cs *ClientService) RunCmd(cmd string) {
-	cs.RunCmdWithOut(cmd, "", true)
+	cs.RunCmdWithOut(cmd, "", false)
 }
 
-//执行命令
 //outf  命令结果保存到文件
 //onel  是否把每个电脑的命令结果合并为一行空格隔开
 func (cs *ClientService) RunCmdWithOut(cmd string, outf string, onel bool) {
@@ -343,22 +347,19 @@ func (cs *ClientService) RunCmdWithOut(cmd string, outf string, onel bool) {
 		file, _ := os.OpenFile(outf, os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.ModePerm)
 		outFile = file
 		defer func() {
-			fmt.Println("保存输出结果至文件:", outf)
+			fmt.Println("保存结果至文件:", outf)
 			outFile.Close()
 		}()
 	}
 	//fmt.Println("执行命令：", cmd)
-	cmd = "ip route|grep 'link src'|awk '{print $9}';" + cmd
+	//cmd = "ip route|grep 'link src'|awk '{print $9}'&&" + cmd
 	for _, c := range cs.Clients {
 		if c.client == nil {
 			continue
 		}
-		var bybu bytes.Buffer
+		var in bytes.Buffer
 		session, err := c.client.NewSession()
-		session.Stdin = &bybu
-		if err != nil {
-			fmt.Println("创建ssh-session错误:", err)
-		}
+		session.Stdin = &in
 		if strings.HasPrefix(cmd, "scp ") {
 			c.scpFile(session, cmd)
 			_ = session.Close()
@@ -366,12 +367,15 @@ func (cs *ClientService) RunCmdWithOut(cmd string, outf string, onel bool) {
 		}
 		if strings.Contains(cmd, "sudo ") {
 			cmd = strings.ReplaceAll(cmd, "sudo ", "sudo -S ")
-			bybu.WriteString(c.Passwd)
+			in.WriteString(c.Passwd)
+		} else {
+			fields := strings.Fields(cmd)
+			in.WriteString(fields[len(fields)-1])
 		}
-		bs, err := session.Output(cmd)
-		bybu.Reset()
+		bs, err := session.CombinedOutput(cmd)
 		if err != nil {
-			fmt.Printf("%s 执行报错：%v\n", c.Ip, err)
+			fmt.Printf("%s 执行报错：%s,%v\n", c.Ip, string(bs), err)
+			continue
 		}
 		if bs != nil {
 			if len(bs) > 0 && bs[0] != 10 && bs[0] != 13 {
@@ -390,13 +394,14 @@ func (cs *ClientService) RunCmdWithOut(cmd string, outf string, onel bool) {
 				if bs[li] != 10 && bs[li] != 13 {
 					bs = append(bs, 10)
 				}
+				oc := string(bs)
+				oc = c.Ip + " " + oc
 				if outFile != nil {
-					outFile.Write(bs)
+					_, _ = outFile.WriteString(oc)
 				}
-				fmt.Print(string(bs))
+				fmt.Print(oc)
 			}
 		}
-		_ = session.Close()
 	}
 	fmt.Println("完成")
 }
@@ -413,7 +418,7 @@ func (cs *ClientService) Close() {
 		}
 	}
 }
-func creatSshConnect(ip, user, passwd string) (*ssh.Client, error) {
+func connectToShh(ip, user, passwd string) (*ssh.Client, error) {
 	sClient, errs := ssh.Dial("tcp", ip+":22", &ssh.ClientConfig{
 		Timeout:         time.Second * 10,
 		User:            user,
